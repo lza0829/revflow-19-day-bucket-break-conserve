@@ -16,6 +16,24 @@ const recalcBusy = ref(false)
 const recalcErr = ref('')
 const report = ref(null)
 
+const proofRunId = ref('')
+const proof = ref(null)
+const proofErr = ref('')
+
+async function loadProofs() {
+  if (!proofRunId.value) {
+    proof.value = null
+    return
+  }
+  proofErr.value = ''
+  try {
+    proof.value = await getJson(`/api/settle-runs/${proofRunId.value}/conserve-proofs`)
+  } catch (e) {
+    proof.value = null
+    proofErr.value = String(e.message || e)
+  }
+}
+
 async function load() {
   const [r, a, c, rr] = await Promise.all([
     getJson('/api/settle-runs'),
@@ -28,6 +46,8 @@ async function load() {
   contributions.value = c
   recalcRuns.value = rr
   if (!recalcAccount.value && a.length) recalcAccount.value = String(a[0].id)
+  if (!proofRunId.value && r.length) proofRunId.value = String(r[0].id)
+  await loadProofs()
 }
 
 onMounted(async () => {
@@ -45,6 +65,7 @@ async function runSettle() {
   try {
     const r = await postJson('/api/settle-runs')
     msg.value = `归并完成 #${r.id}：净额 ${(r.net_cents / 100).toFixed(2)}，隔离 ${r.quarantine_count}`
+    proofRunId.value = String(r.id)
     await load()
   } catch (e) {
     err.value = String(e.message || e)
@@ -233,6 +254,72 @@ function provenance(c) {
     </div>
 
     <div class="panel">
+      <h2>守恒证明（按归并运行）</h2>
+      <p class="note-strip">
+        归并运行发布时为本趟触及账户同源派生守恒证明并落库（挂归并运行 id，此处只读展示）：
+        各日净贡献之和 = 全日合计，须等于已归并正冲净额；差额非零则整趟回滚，证明不发布。
+      </p>
+      <div class="row-actions">
+        <select v-model="proofRunId" class="sel" @change="loadProofs">
+          <option v-for="r in runs" :key="r.id" :value="String(r.id)">
+            归并#{{ r.id }} · {{ r.status }} · {{ r.finished_at || r.started_at }}
+          </option>
+        </select>
+      </div>
+      <p v-if="proofErr" class="msg">{{ proofErr }}</p>
+      <div v-if="proof">
+        <div class="stats">
+          <div class="stat">
+            <div class="k">全日合计（元）</div>
+            <div class="v">{{ yuan(proof.total_cents) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k">正冲净额（元）</div>
+            <div class="v">{{ yuan(proof.ledger_net_cents) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k">差额（元）</div>
+            <div class="v">{{ yuan(proof.diff_cents) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k">守恒</div>
+            <div class="v">
+              <span class="tag" :class="proof.consistent ? 'on' : 'bad'">
+                {{ proof.consistent ? '守恒' : '不守恒' }}
+              </span>
+            </div>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>账户</th><th>各日净贡献（元）</th><th>全日合计（元）</th><th>正冲净额（元）</th><th>差额（元）</th><th>守恒</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in proof.proofs" :key="p.account_id">
+              <td>{{ p.account_code }} · {{ p.account_name }}</td>
+              <td>
+                <span v-for="d in p.day_nets" :key="d.day" class="day-chip">
+                  {{ d.day }} · {{ yuan(d.net_cents) }}
+                </span>
+              </td>
+              <td>{{ yuan(p.total_cents) }}</td>
+              <td>{{ yuan(p.ledger_net_cents) }}</td>
+              <td>{{ yuan(p.diff_cents) }}</td>
+              <td>
+                <span class="tag" :class="p.consistent ? 'on' : 'bad'">
+                  {{ p.consistent ? '守恒' : '不守恒' }}
+                </span>
+              </td>
+            </tr>
+            <tr v-if="!proof.proofs.length"><td colspan="6">该运行未触及任何账户，无守恒证明</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>重算运行</h2>
       <table>
         <thead>
@@ -274,6 +361,16 @@ function provenance(c) {
 }
 .report { margin-top: 6px; }
 .report .stats { margin-bottom: 12px; }
+.day-chip {
+  display: inline-block;
+  margin: 2px 6px 2px 0;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
 .sub {
   margin: 16px 0 8px;
   font-family: var(--display);

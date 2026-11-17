@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS settle_runs (
   settled_count INTEGER NOT NULL DEFAULT 0,
   quarantine_count INTEGER NOT NULL DEFAULT 0,
   net_cents INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -85,12 +86,35 @@ CREATE TABLE IF NOT EXISTS day_recalc_runs (
   report_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
 );
+-- 守恒证明：归并运行发布时按账户同源派生（各日净贡献、全日合计、正冲净额、差额），
+-- 挂归并运行 id，只读可查；差额非零的整趟回滚，证明不发布。
+CREATE TABLE IF NOT EXISTS conserve_proofs (
+  id INTEGER PRIMARY KEY,
+  settle_run_id INTEGER NOT NULL REFERENCES settle_runs(id),
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  day_nets_json TEXT NOT NULL,
+  day_count INTEGER NOT NULL,
+  total_cents INTEGER NOT NULL,
+  ledger_net_cents INTEGER NOT NULL,
+  diff_cents INTEGER NOT NULL,
+  consistent INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(settle_run_id, account_id)
+);
 """
+
+
+def _ensure_column(conn, table: str, column: str, ddl: str) -> None:
+    """老库补列（CREATE TABLE IF NOT EXISTS 不会改已有表）。"""
+    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "settle_runs", "error", "error TEXT NOT NULL DEFAULT ''")
         n = conn.execute("SELECT COUNT(*) AS c FROM accounts").fetchone()["c"]
         if n:
             return

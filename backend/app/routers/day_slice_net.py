@@ -30,3 +30,9 @@ def get_run(run_id: int):
 @router.get("/day-contributions")
 def get_contributions(account_id: int | None = Query(None)):
     return svc.list_contributions(account_id)
+
+
+@router.get("/settle-runs/{run_id}/conserve-proofs")
+def get_conserve_proofs(run_id: int):
+    """按归并运行 id 只读查询守恒证明（各日净贡献、全日合计、正冲净额、差额）。"""
+    return svc.list_conserve_proofs(run_id)

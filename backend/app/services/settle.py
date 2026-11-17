@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from app.db import connect, rows_to_dicts
-from app.modules.day_slice_net import rebuild_account_days
+from app.modules.day_slice_net import (
+    SettleConserveFailed,
+    rebuild_account_days,
+    write_conserve_proof,
+)
 
 
 def _now() -> str:
@@ -98,9 +102,17 @@ def list_verify_reports() -> list[dict]:
 
 
 def run_settle() -> dict:
-    """净额归并：待归并正向−已匹配冲正配平；无原单/超额冲正进隔离；
-    随后按账户从已归并流水全量重建日贡献（物化分日净额），余额 = Σ 日贡献。"""
-    with connect() as conn:
+    """净额归并：待归并正向−已匹配冲正配平；无原单/超额冲正进隔离。
+
+    守恒发布（择一：自身入账日入桶 + 整体替换 + 整趟回滚）：
+      归并后仅对「本趟触及账户」（本运行置为已归并的流水所属账户），按流水自身
+      booked_at 入账日整体重衍日贡献，余额 = Σ 日贡献；并按账户同源写守恒证明
+      （各日净贡献、全日合计、正冲净额、差额，挂本运行 id）。任一账户差额非零
+      即整趟回滚、另记「失败」运行；未触及账户的日桶与余额一律不改写。
+    """
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         now = _now()
         cur = conn.execute(
             """
@@ -194,12 +206,17 @@ def run_settle() -> dict:
             )
             settled += 1
 
-        # 全量重建：凡有已归并流水的账户，日贡献整表重衍、余额 = Σ 日贡献（自愈任何漂移）
+        # 整体替换本趟触及账户的日贡献（未触及账户的日桶与余额不改写）：
+        # 余额 = Σ 日贡献；每账户写守恒证明，差额非零即整趟回滚
         net_total = 0
         acc_ids = [
             r["account_id"]
             for r in conn.execute(
-                "SELECT DISTINCT account_id FROM ledger_entries WHERE status = '已归并'"
+                """
+                SELECT DISTINCT account_id FROM ledger_entries
+                WHERE status = '已归并' AND settle_run_id = ?
+                """,
+                (run_id,),
             ).fetchall()
         ]
         for acc_id in acc_ids:
@@ -209,6 +226,7 @@ def run_settle() -> dict:
                 (acct_total, run_id, acc_id),
             )
             net_total += acct_total
+            write_conserve_proof(conn, acc_id, settle_run_id=run_id, now=now)
 
         finished = _now()
         conn.execute(
@@ -235,6 +253,30 @@ def run_settle() -> dict:
         )
         conn.commit()
         return get_settle_run(run_id)
+    except SettleConserveFailed as e:
+        conn.rollback()
+        fail_id = _record_settle_failure(str(e), e.context)
+        raise HTTPException(409, f"归并守恒校验失败，已整趟回滚（失败运行 #{fail_id}）：{e}")
+    except HTTPException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _record_settle_failure(error: str, context: dict) -> int:
+    """整趟回滚后另起事务登记「失败」归并运行，备查不改账。"""
+    with connect() as conn:
+        now = _now()
+        cur = conn.execute(
+            """
+            INSERT INTO settle_runs(status, error, started_at, finished_at)
+            VALUES ('失败', ?, ?, ?)
+            """,
+            (f"{error}｜{json.dumps(context, ensure_ascii=False)}", now, now),
+        )
+        conn.commit()
+        return cur.lastrowid
 
 
 def get_settle_run(run_id: int) -> dict:
